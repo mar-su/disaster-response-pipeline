@@ -10,7 +10,4 @@ dependencies:
   - nltk
   - sqlalchemy
   - flask
-  - dash
-  - dash-core-components
-  - dash-html-components
-  - dash-bootstrap-components
+  - gensim

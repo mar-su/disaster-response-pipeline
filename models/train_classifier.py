@@ -14,6 +14,9 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.multioutput import MultiOutputClassifier
 from sklearn.metrics import classification_report, confusion_matrix, label_ranking_loss, label_ranking_average_precision_score
 from sklearn.svm import SVC
+from sklearn.base import TransformerMixin, BaseEstimator
+from sklearn.preprocessing import FunctionTransformer
+from gensim.sklearn_api import D2VTransformer
 import pickle
 import re
 import nltk
@@ -31,6 +34,35 @@ def load_data(database_filepath):
     Y = df.drop(columns=features + drop)
     return X, Y
 
+class TopicCentroidDistance(BaseEstimator, TransformerMixin):
+    """
+    Calculate centroids for each positive instance and calculate distance
+    to these centroids.
+    """
+    def __init__(self, vector_size=10):
+        self.vector_size = vector_size
+        self.d2v = D2VTransformer(size=vector_size, min_count=1, seed=1)
+
+    def fit(self, X, y):
+        X_vec = self.d2v.fit_transform(X)
+        self.centroids = np.zeros((y.shape[1], self.vector_size))
+        if isinstance(y, pd.DataFrame):
+            y = y.values
+        for i in range(y.shape[1]):
+            if (y[:,i]==1).sum() > 0:
+                self.centroids[i,:] = X_vec[y[:,i]==1].mean(axis=0)
+        return self
+
+    def transform(self, X):
+        X_vec = self.d2v.transform(X)
+        distance = np.empty((X_vec.shape[0],self.centroids.shape[0]))
+        for i in range(self.centroids.shape[0]):
+            distance[:,i] = np.apply_along_axis(lambda x: np.linalg.norm(x - self.centroids[i,:], ord=2), 1, X_vec)
+        return distance
+
+    def fit_transform(self, X, y):
+        self.fit(X, y)
+        return self.transform(X)
 
 
 lemmatizer = WordNetLemmatizer()
@@ -51,21 +83,32 @@ def tokenize(text):
     words = [lemmatizer.lemmatize(word) for word in words]
     return words
 
+def vector_tokenize(texts):
+    return list(map(tokenize, texts))
 
 def build_model():
+
     pipeline = Pipeline([
         ("ct", ColumnTransformer([
-            ("msg", Pipeline([
-                ("cv", CountVectorizer(tokenizer=tokenize)),
-                ("tfidf", TfidfTransformer()),
+            ("msgVec", Pipeline([
+                ("tokenizer", FunctionTransformer(func=vector_tokenize, validate=False)),
+                ("d2v", D2VTransformer(min_count=1, seed=1)),
+            ]), "message"),
+            ("centroidDistance", Pipeline([
+                ("tokenizer", FunctionTransformer(func=vector_tokenize, validate=False)),
+                ("tcd", TopicCentroidDistance()),
             ]), "message"),
             ("genre_onehot", OneHotEncoder(dtype="int"), ["genre"])
         ])),
         ("clf", MultiOutputClassifier(RandomForestClassifier()))
     ])
-    parameters = dict(clf__estimator__n_estimators=[5,10,15])
+    parameters = dict(
+        clf__estimator__n_estimators=[10, 50],
+        ct__centroidDistance__tcd__vector_size=[10, 50, 75],
+        ct__msgVec__d2v__size=[10, 50, 75]
+    )
 
-    return GridSearchCV(pipeline, parameters)
+    return GridSearchCV(pipeline, parameters, n_jobs=3)
 
 
 def evaluate_model(model, X_test, Y_test):
